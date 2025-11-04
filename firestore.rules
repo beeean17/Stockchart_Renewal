@@ -1,0 +1,40 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Stock data - read by everyone, write only by Cloud Functions
+    match /stocks/{stockCode} {
+      allow read: if true;
+      allow write: if false; // Only Cloud Functions can write
+
+      // Monthly subcollection
+      match /monthly/{monthDoc} {
+        allow read: if true;
+        allow write: if false; // Only Cloud Functions can write
+      }
+    }
+
+    // User-specific data (horizontal lines, settings)
+    match /users/{userId} {
+      // Users can only access their own data
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+
+      // User's horizontal lines
+      match /lines/{lineId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+
+      // User's settings
+      match /settings/{settingId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+
+    // System metadata - read by everyone, write only by Cloud Functions
+    match /metadata/{doc} {
+      allow read: if true;
+      allow write: if false; // Only Cloud Functions can write
+    }
+  }
+}

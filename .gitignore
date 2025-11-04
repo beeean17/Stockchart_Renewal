@@ -1,1 +1,17 @@
 .env
+
+# Firebase
+serviceAccountKey.json
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+*.cache
+
+# Functions
+functions/__pycache__/
+functions/.venv/
+functions/venv/
+
+# React Build
+Client/build/
