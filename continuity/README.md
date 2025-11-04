@@ -28,7 +28,8 @@
 ### 새로운 시스템
 - Frontend: React (CRA) + TradingView Lightweight Charts v5 (유지)
 - Backend: Firebase Cloud Functions (Python/Node.js)
-- Database: Firebase Firestore
+- Database: Firebase Firestore (월별 청크 구조)
+- Authentication: Firebase Authentication (Google 로그인)
 - Hosting: Firebase Hosting
 - Mobile: Android WebView (선택사항)
 
@@ -59,6 +60,8 @@ project-docs/
 - 📱 **반응형**: 하나의 코드로 Desktop + Mobile
 - 🚀 **빠른 배포**: 웹 배포 시 모든 기기 즉시 반영
 - 🛠️ **간단 관리**: 서버 관리 불필요
+- 🔐 **보안**: 구글 로그인으로 사용자별 데이터 분리
+- ⚡ **고효율**: 월별 청크 구조로 읽기 95% 감소
 
 ## 📝 프로젝트 상태
 

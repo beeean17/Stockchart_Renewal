@@ -79,13 +79,23 @@
 #### 2. Firebase 서비스 활성화
 **체크리스트**:
 - [ ] Firestore Database 활성화
-  - 위치: asia-northeast1 (서울) 또는 asia-northeast3 (오사카)
+  - 위치: asia-northeast3 (서울) 또는 asia-northeast1 (오사카)
   - 모드: 프로덕션 (보안 규칙 나중에 설정)
+- [ ] Firebase Authentication 활성화
+  - Sign-in method: Google 활성화
+  - 승인된 도메인 확인
 - [ ] Firebase Hosting 활성화
 - [ ] Cloud Functions 활성화
 - [ ] Cloud Scheduler 활성화 (결제 정보 필요, Spark는 무료)
 
-#### 3. 로컬 개발 환경
+#### 3. 보안 규칙 설정
+**체크리스트**:
+- [ ] Firestore Security Rules 업데이트
+  - 주식 데이터: 모두 읽기, Cloud Function만 쓰기
+  - 사용자 데이터: 본인만 접근
+  - 가로선: 로그인 필수, 본인만 접근
+
+#### 4. 로컬 개발 환경
 **체크리스트**:
 - [ ] Node.js 설치 (v18 이상)
 - [ ] Firebase CLI 설치: `npm install -g firebase-tools`
@@ -157,53 +167,53 @@ FROM stock;
   - Firebase Console → 프로젝트 설정 → 서비스 계정
   - "새 비공개 키 생성" → JSON 파일 다운로드
 
-#### 마이그레이션 스크립트 구조
-```python
-# migrate.py
-
-import firebase_admin
-from firebase_admin import credentials, firestore
-import pymysql
-from datetime import datetime
-
-# 1. 연결 설정
-# 2. stock_info + dividend → stocks/{code}
-# 3. stock → stocks/{code}/daily/{date}
-# 4. horizontal → users/{userId}/lines/{lineId}
-# 5. data_time → metadata/lastUpdate
+#### 마이그레이션 스크립트 구조 (월별 구조)
 ```
+마이그레이션 단계:
+1. 연결 설정 (MariaDB, Firestore)
+2. stock_info + dividend → stocks/{code}
+   - 기본 정보, 배당 배열, latest
+3. stock 테이블 → 월별 구조로 변환
+   - 최근 90일 → stocks/{code}/recent (배열)
+   - 나머지 → stocks/{code}/monthly/{YYYY-MM}/days (배열)
+   - 날짜별로 그룹핑하여 월별 문서 생성
+4. horizontal → users/{userId}/lines/{lineId}
+   - 기본 사용자 ID 할당 또는 수동 분리
+5. data_time → metadata/system
+```
+
+**주요 변환 로직**:
+- 일별 데이터를 date 기준으로 월별 그룹핑
+- 최근 90일은 recent 배열에 저장
+- 배당 데이터는 별도 배열로 (일별 데이터에 포함 안 함)
 
 ### Day 2: 마이그레이션 실행 및 검증
 
 #### 실행 단계
 **체크리스트**:
 - [ ] 소량 테스트 (1-2 종목)
-- [ ] 데이터 검증
+- [ ] 데이터 검증 (월별 구조 확인)
 - [ ] 전체 마이그레이션 실행
 - [ ] 최종 검증
 
 #### 검증 항목
 **체크리스트**:
 - [ ] 종목 수 일치
-- [ ] 일별 데이터 수 일치
-- [ ] 배당 데이터 정확성
+- [ ] 일별 데이터 총 개수 일치
+- [ ] 월별 문서 개수 확인 (종목 × 월 수)
+- [ ] recent 배열 크기 (최대 90개)
+- [ ] 배당 데이터 정확성 (배열 형태)
 - [ ] 날짜 범위 확인
 - [ ] 가로선 데이터 확인
+- [ ] 타임스탬프 필드 존재 확인
 
-**검증용 코드**:
-```python
-# verify.py
-
-def verify_migration():
-    # MariaDB에서 카운트
-    mariadb_count = get_mariadb_count()
-    
-    # Firestore에서 카운트
-    firestore_count = get_firestore_count()
-    
-    # 비교
-    assert mariadb_count == firestore_count
-    print("✅ 마이그레이션 성공!")
+**검증 쿼리**:
+```
+Firestore Console에서:
+1. stocks 컬렉션 문서 수 = MariaDB 종목 수
+2. 임의 종목의 monthly 서브컬렉션 문서 수 확인
+3. recent 배열 길이 확인 (최대 90)
+4. dividends 배열 확인 (일별 데이터에 없음)
 ```
 
 ---
@@ -246,7 +256,7 @@ def verify_migration():
 
 ## 📋 Week 4: React 앱 수정
 
-### Day 1-2: Firebase SDK 통합
+### Day 1-2: Firebase SDK 통합 + Authentication
 
 #### 1. 패키지 설치 및 설정
 **체크리스트**:
@@ -255,35 +265,69 @@ def verify_migration():
   npm install firebase
   ```
 - [ ] Firebase 초기화 코드 작성 (`src/firebase.js`)
+  - Firestore 초기화
+  - Authentication 초기화
+  - GoogleAuthProvider 설정
 - [ ] 환경 변수 설정 (`.env`)
 
-#### 2. Firestore 연동
+#### 2. Authentication 구현
+**체크리스트**:
+- [ ] AuthContext 생성
+  - Google 로그인 함수
+  - 로그아웃 함수
+  - 현재 사용자 상태 관리
+- [ ] LoginButton 컴포넌트
+  - 로그인 시: 사용자 정보 + 로그아웃 버튼
+  - 비로그인 시: Google 로그인 버튼
+- [ ] App.js에 AuthProvider 래핑
+
+#### 3. Firestore 연동
 **체크리스트**:
 - [ ] 기존 API 호출 제거
-- [ ] Firestore 쿼리로 대체
-- [ ] 실시간 리스너 추가 (선택)
+- [ ] Firestore 쿼리로 대체 (월별 구조)
+  - 종목 문서 + recent 배열 로드 (1 read)
+  - 필요시 월별 데이터 로드 (N reads)
+- [ ] 실시간 리스너 추가 (가로선용)
 - [ ] 로컬 캐싱 활성화
 
 ### Day 3-4: 기능 이식
 
-#### 1. 차트 데이터 로딩
+#### 1. 차트 데이터 로딩 (월별 구조)
 **체크리스트**:
 - [ ] 종목 선택 시 데이터 로드
+  - 종목 문서 로드 (recent + 배당 포함)
+  - 추가 히스토리 필요 시 월별 로드
 - [ ] TradingView 차트 연동
-- [ ] 배당 마커 표시
+- [ ] 배당 마커 표시 (배열에서 로드)
 - [ ] 거래량 차트 표시
 
-#### 2. 사용자 기능
+#### 2. 사용자 기능 (인증 기반)
 **체크리스트**:
-- [ ] 가로선 저장/수정/삭제
+- [ ] 가로선 CRUD - 로그인 필수
+  - 비로그인: 기능 숨김 + 안내 메시지
+  - 로그인: users/{userId}/lines 접근
+  - 실시간 동기화 (onSnapshot)
 - [ ] 사이드바 토글
 - [ ] 차트 요소 토글
-- [ ] 설정 저장
+- [ ] 설정 저장 (로그인 시)
 
-#### 3. 테스트
+#### 3. 권한 제어
+**체크리스트**:
+- [ ] 비로그인 사용자
+  - 차트 조회: 허용
+  - 가로선 기능: 숨김
+  - 로그인 안내 표시
+- [ ] 로그인 사용자
+  - 모든 기능 활성화
+  - 본인 가로선만 표시
+
+#### 4. 테스트
 **체크리스트**:
 - [ ] 로컬 개발 서버: `npm start`
-- [ ] 모든 기능 작동 확인
+- [ ] 비로그인 상태 테스트
+- [ ] Google 로그인 테스트
+- [ ] 가로선 추가/수정/삭제 테스트
+- [ ] 다른 계정으로 로그인 시 분리 확인
 - [ ] 버그 수정
 
 ---
