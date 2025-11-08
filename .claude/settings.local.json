@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "Bash(firebase --version:*)",
-      "Bash(firebase deploy:*)"
+      "Bash(firebase deploy:*)",
+      "Bash(firebase projects:list:*)",
+      "Bash(python3:*)",
+      "Bash(if [ -f migration/.env ])",
+      "Bash(then echo \"✅ .env file exists\")",
+      "Bash(else echo \"❌ .env file not found\")",
+      "Bash(fi)",
+      "Bash(python setup_check.py:*)",
+      "Bash(python -c:*)"
     ],
     "deny": [],
     "ask": []

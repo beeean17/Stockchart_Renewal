@@ -1,4 +1,6 @@
 .env
+.claude/
+.idea/
 
 # Firebase
 serviceAccountKey.json

@@ -11,19 +11,20 @@ firestore/
 ├── stocks/                          # 주식 데이터
 │   └── {code}/                      # 종목코드별 문서
 │       ├── (문서 필드)
-│       │   ├── code                 # 종목코드
 │       │   ├── name                 # 종목명
 │       │   ├── period               # 월중/월말
-│       │   ├── latest               # 최신 가격 정보
-│       │   ├── dividends            # 배당 정보 (배열)
-│       │   ├── recent               # 최근 90일 데이터 (배열)
 │       │   ├── updated_at           # 마지막 업데이트 시간
-│       │   └── created_at           # 최초 생성 시간
+│       │   │
+│       │   └── dividends            # 배당 정보 (Map)
+│       │      └── "2025": {
+│       │         "10-30": 123
+│       │       }
 │       │
 │       └── monthly/                 # 월별 데이터 서브컬렉션
 │           └── {YYYY-MM}/           # 월별 문서
-│               ├── days             # 해당 월의 일별 데이터 (배열)
-│               └── updated_at       # 월 데이터 업데이트 시간
+│               └── days (Map) {
+│                  "05": { close, volume, open, low, high }
+│                }
 │
 ├── users/                           # 사용자 데이터 (인증 기반)
 │   └── {userId}/                    # Firebase Auth UID
@@ -62,56 +63,29 @@ firestore/
 ```javascript
 {
   // 기본 정보
-  code: "005930",                   // 종목코드
   name: "삼성전자",                 // 종목명
   period: "월말",                   // 월중/월말
-  
-  // 최신 정보 (리스트 표시용)
-  latest: {
-    price: 58200,                   // 최신 종가
-    date: "2024-11-04",            // 날짜
-    change: -0.5                    // 등락률
-  },
-  
-  // 배당 정보 (배열로 별도 관리)
-  dividends: [
-    {
-      date: "2024-03-29",          // 배당락일
-      price: 361                    // 배당금
+
+  // 배당 정보 (Map: 년도 -> 날짜 -> 금액)
+  dividends: {
+    "2024": {
+      "03-29": 361,                // 배당락일: 배당금
+      "06-28": 361
     },
-    {
-      date: "2024-06-28",
-      price: 361
+    "2025": {
+      "10-30": 123
     }
-  ],
-  
-  // 최근 90일 데이터 (빠른 초기 로딩용)
-  recent: [
-    {
-      date: "2024-11-04",
-      o: 58100,                     // 시가
-      h: 58500,                     // 고가
-      l: 57800,                     // 저가
-      c: 58200,                     // 종가
-      v: 12345678                   // 거래량
-    },
-    // ... 최근 90일
-  ],
-  
+  },
+
   // 타임스탬프
-  updated_at: Timestamp,            // 마지막 업데이트
-  created_at: Timestamp             // 최초 생성
+  updated_at: Timestamp             // 마지막 업데이트
 }
 ```
 
 **인덱스**:
-- `code` (자동)
+- 문서 ID (종목코드)
 - `name`
 - `updated_at`
-
-**읽기 효율**:
-- 종목 문서 1개 읽기로 최근 90일 + 배당 전체 조회 가능
-- 초기 로딩 시 1 read로 차트 표시
 
 ---
 
@@ -122,29 +96,24 @@ firestore/
 **문서 구조**:
 ```javascript
 {
-  // 해당 월의 모든 일별 데이터 (배열)
-  days: [
-    {
-      date: "2024-11-01",
-      o: 58000,
-      h: 58400,
-      l: 57900,
-      c: 58100,
-      v: 11234567
+  // 해당 월의 모든 일별 데이터 (Map: 일 -> 데이터)
+  days: {
+    "01": {
+      close: 58100,               // 종가
+      volume: 11234567,           // 거래량
+      open: 58000,                // 시가
+      low: 57900,                 // 저가
+      high: 58400                 // 고가
     },
-    {
-      date: "2024-11-04",
-      o: 58100,
-      h: 58500,
-      l: 57800,
-      c: 58200,
-      v: 12345678
+    "04": {
+      close: 58200,
+      volume: 12345678,
+      open: 58100,
+      low: 57800,
+      high: 58500
     }
-    // ... 해당 월의 모든 영업일
-  ],
-  
-  // 타임스탬프
-  updated_at: Timestamp             // 이 월의 마지막 업데이트
+    // ... 해당 월의 모든 영업일 (일자를 키로 사용)
+  }
 }
 ```
 
@@ -155,9 +124,10 @@ firestore/
 - 1년 데이터 = 12번 읽기 (일별 구조면 250번)
 - 문서 크기: ~3.5KB (23일 × 150 bytes) < 1MB 제한 안전
 - 월 단위 업데이트 효율적
+- Map 구조로 특정 일자 데이터 빠른 접근
 
 **쿼리 예시**:
-```
+```javascript
 // 최근 1년 데이터 (12개월)
 db.collection('stocks/005930/monthly')
   .orderBy('__name__', 'desc')
@@ -309,31 +279,34 @@ db.collection('users/user1/lines')
 
 ## 🔄 MariaDB → Firestore 매핑
 
-### stock 테이블 → 월별 구조로 변환
+### stock 테이블 → 월별 Map 구조로 변환
 ```
 MariaDB:
 stock(code, date, open, high, low, close, volume)
 
 Firestore:
-1. 최근 90일 → stocks/{code}/recent (배열)
-2. 나머지 → stocks/{code}/monthly/{YYYY-MM}/days (배열)
+stocks/{code}/monthly/{YYYY-MM}/days (Map)
 
 변환 로직:
-- date 기준으로 최근 90일과 그 이전 분리
-- 이전 데이터는 월별로 그룹핑
-- 각 월의 데이터를 days 배열에 저장
+- date 기준으로 월별로 그룹핑
+- 각 월의 데이터를 days Map에 저장
+- Map 키: 일자 (예: "05", "15")
+- Map 값: {close, volume, open, low, high}
 ```
 
-### dividend 테이블 → 배열로 통합
+### dividend 테이블 → 중첩 Map 구조로 통합
 ```
 MariaDB:
 dividend(code, date, price)
 
 Firestore:
-stocks/{code}/dividends (배열)
+stocks/{code}/dividends (중첩 Map: year -> date -> amount)
 
 변환:
-- 같은 종목의 배당을 배열로 합침
+- 같은 종목의 배당을 중첩 Map으로 변환
+- 1단계 키: 년도 (예: "2024", "2025")
+- 2단계 키: 월-일 (예: "03-29", "10-30")
+- 값: 배당금액 (예: 361)
 - 일별 데이터에는 포함하지 않음 (별도 관리)
 ```
 
@@ -388,18 +361,15 @@ metadata/system
 **stocks/{code}** (종목 문서):
 ```
 기본 정보: ~100 bytes
-latest: ~50 bytes
-dividends: ~30 bytes × 4회/년 = 120 bytes
-recent (90일): ~150 bytes × 90 = 13.5 KB
+dividends (Map 구조): ~30 bytes × 4회/년 = 120 bytes
 타임스탬프: ~50 bytes
 
-총: ~14 KB per 종목
+총: ~270 bytes per 종목
 ```
 
 **stocks/{code}/monthly/{YYYY-MM}** (월별 문서):
 ```
-days 배열: ~150 bytes × 23일(평균) = 3.45 KB
-타임스탬프: ~30 bytes
+days Map: ~150 bytes × 23일(평균) = 3.45 KB
 
 총: ~3.5 KB per 월
 ```
@@ -415,75 +385,92 @@ days 배열: ~150 bytes × 23일(평균) = 3.45 KB
 **현재 (0.43MB MariaDB)**:
 ```
 50 종목:
-- 종목 문서: 50 × 14 KB = 700 KB
-- 월별 데이터 (현재까지): 50종목 × 평균 몇 개월 = 약 500 KB
+- 종목 문서: 50 × 270 bytes = 13.5 KB
+- 월별 데이터 (현재까지): 50종목 × 평균 몇 개월 × 3.5 KB = 약 500 KB
 
-총: ~1.2 MB
+총: ~513 KB
 ```
 
 **10년 후 예상**:
 ```
 50 종목:
-- 종목 문서: 50 × 14 KB = 700 KB (recent 90일만)
+- 종목 문서: 50 × 270 bytes = 13.5 KB
 - 월별 데이터: 50 × 120개월 × 3.5 KB = 21 MB
 - 사용자 데이터: 2 users × 2 KB = 4 KB
 - 메타데이터: ~10 KB
 
-총: ~22 MB
+총: ~21 MB
 ```
 
 **비교**:
 - 일별 구조 예상: ~50 MB (250일/년 × 10년 × 50종목 × 150 bytes)
-- 월별 구조 예상: ~22 MB
-- **절감**: 약 56% 저장 공간 효율
+- 월별 Map 구조 예상: ~21 MB
+- **절감**: 약 58% 저장 공간 효율
 
 ---
 
 ## 🔍 쿼리 패턴
 
-### 1. 차트 로드
+### 1. 차트 로드 (1년치 데이터)
 ```javascript
-// 1년치 데이터
+// 최근 12개월 데이터 조회
 const querySnapshot = await db
-  .collection('stocks/005930/daily')
-  .orderBy('date', 'desc')
-  .limit(250)
+  .collection('stocks/005930/monthly')
+  .orderBy('__name__', 'desc')
+  .limit(12)
   .get();
 
-const chartData = querySnapshot.docs.map(doc => ({
-  time: doc.data().date,
-  open: doc.data().open,
-  high: doc.data().high,
-  low: doc.data().low,
-  close: doc.data().close,
-  volume: doc.data().volume
-}));
-```
+// Map 구조 데이터 변환
+const chartData = [];
+querySnapshot.docs.forEach(doc => {
+  const yearMonth = doc.id; // "2024-11"
+  const days = doc.data().days;
 
-### 2. 실시간 업데이트
-```javascript
-// 특정 종목 실시간 감시
-db.collection('stocks/005930/daily')
-  .orderBy('date', 'desc')
-  .limit(1)
-  .onSnapshot(snapshot => {
-    snapshot.docChanges().forEach(change => {
-      if (change.type === 'added') {
-        updateChart(change.doc.data());
-      }
+  Object.entries(days).forEach(([day, data]) => {
+    chartData.push({
+      time: `${yearMonth}-${day}`, // "2024-11-05"
+      open: data.open,
+      high: data.high,
+      low: data.low,
+      close: data.close,
+      volume: data.volume
     });
   });
+});
 ```
 
-### 3. 증분 동기화
+### 2. 종목 정보 및 배당 조회
 ```javascript
-// 마지막 동기화 이후 데이터만
-const lastSync = await getLastSyncTime();
+// 종목 기본 정보 + 배당 데이터
+const stockDoc = await db.collection('stocks').doc('005930').get();
+const stockData = stockDoc.data();
 
-const newData = await db
-  .collectionGroup('daily')  // 모든 종목의 daily
-  .where('timestamp', '>', lastSync)
+console.log(stockData.name);     // "삼성전자"
+console.log(stockData.period);   // "월말"
+
+// 배당 Map 처리
+const dividends = [];
+Object.entries(stockData.dividends || {}).forEach(([year, dates]) => {
+  Object.entries(dates).forEach(([date, amount]) => {
+    dividends.push({
+      date: `${year}-${date}`,   // "2024-03-29"
+      amount: amount              // 361
+    });
+  });
+});
+```
+
+### 3. 특정 월 데이터 조회
+```javascript
+// 특정 월의 데이터만 조회
+const monthDoc = await db
+  .collection('stocks/005930/monthly')
+  .doc('2024-11')
   .get();
+
+const days = monthDoc.data().days;
+// Map 구조로 특정 일자 빠른 접근
+console.log(days['05']);  // { close: 58100, volume: ..., open: ..., low: ..., high: ... }
 ```
 
 ### 4. 여러 종목 동시 조회
@@ -491,9 +478,9 @@ const newData = await db
 // Batch Get (효율적)
 const stockCodes = ['005930', '000660', '035420'];
 const promises = stockCodes.map(code =>
-  db.collection(`stocks/${code}/daily`)
-    .orderBy('date', 'desc')
-    .limit(30)
+  db.collection(`stocks/${code}/monthly`)
+    .orderBy('__name__', 'desc')
+    .limit(12)
     .get()
 );
 
@@ -579,16 +566,17 @@ service cloud.firestore {
 
 ### 1. 복합 인덱스
 ```
-stocks/{code}/daily:
-- date (desc), timestamp (desc)
+stocks/{code}:
+- name (asc), updated_at (desc)
 
 users/{userId}/lines:
 - stockCode (asc), price (desc)
 ```
 
 ### 2. 데이터 분할
-- 너무 큰 배열은 서브컬렉션으로
-- 예: 배당 데이터가 100개 이상이면 서브컬렉션 고려
+- Map 구조는 1MB 제한 고려
+- 예: 월별 데이터가 너무 크면 분기별 또는 반기별로 분할 고려
+- 배당 데이터가 매우 많아지면 별도 서브컬렉션 고려
 
 ### 3. 캐싱 전략
 ```javascript
@@ -611,59 +599,75 @@ firebase.firestore().enablePersistence()
 // MariaDB → Firestore 마이그레이션 의사코드
 
 async function migrate() {
-  // 1. stock_info + dividend → stocks/{code}
+  // 1. stock_info + dividend → stocks/{code} (Map 구조)
   const stocks = await mariadb.query('SELECT * FROM stock_info');
   for (const stock of stocks) {
     const dividends = await mariadb.query(
-      'SELECT * FROM dividend WHERE code = ?',
+      'SELECT * FROM dividend WHERE code = ? ORDER BY date',
       [stock.code]
     );
-    
+
+    // 배당을 중첩 Map으로 변환
+    const dividendMap = {};
+    dividends.forEach(d => {
+      const [year, month, day] = d.date.split('-');
+      const monthDay = `${month}-${day}`;
+
+      if (!dividendMap[year]) {
+        dividendMap[year] = {};
+      }
+      dividendMap[year][monthDay] = d.price;
+    });
+
     await firestore.collection('stocks').doc(stock.code).set({
-      code: stock.code,
       name: stock.name,
       period: stock.period,
-      dividends: dividends.map(d => ({
-        date: d.date,
-        price: d.price
-      })),
-      created_at: FieldValue.serverTimestamp()
+      dividends: dividendMap,
+      updated_at: FieldValue.serverTimestamp()
     });
   }
-  
-  // 2. stock → stocks/{code}/daily/{date}
+
+  // 2. stock → stocks/{code}/monthly/{YYYY-MM} (Map 구조)
   for (const stock of stocks) {
     const dailyData = await mariadb.query(
-      'SELECT * FROM stock WHERE code = ?',
+      'SELECT * FROM stock WHERE code = ? ORDER BY date',
       [stock.code]
     );
-    
-    const batch = firestore.batch();
+
+    // 월별로 그룹핑
+    const monthlyData = {};
     dailyData.forEach(data => {
-      const ref = firestore
-        .collection('stocks')
-        .doc(stock.code)
-        .collection('daily')
-        .doc(data.date);
-      
-      batch.set(ref, {
-        date: data.date,
-        open: data.open,
-        high: data.high,
-        low: data.low,
+      const [year, month, day] = data.date.split('-');
+      const yearMonth = `${year}-${month}`;
+
+      if (!monthlyData[yearMonth]) {
+        monthlyData[yearMonth] = {};
+      }
+
+      monthlyData[yearMonth][day] = {
         close: data.close,
         volume: data.volume,
-        timestamp: FieldValue.serverTimestamp()
-      });
+        open: data.open,
+        low: data.low,
+        high: data.high
+      };
     });
-    
-    await batch.commit();
+
+    // 각 월별 문서 생성
+    for (const [yearMonth, days] of Object.entries(monthlyData)) {
+      await firestore
+        .collection('stocks')
+        .doc(stock.code)
+        .collection('monthly')
+        .doc(yearMonth)
+        .set({ days });
+    }
   }
-  
+
   // 3. horizontal → users/{userId}/lines/{lineId}
   // 사용자 ID 매핑 필요
-  
-  // 4. data_time → metadata/lastUpdate
+
+  // 4. data_time → metadata/system
 }
 ```
 

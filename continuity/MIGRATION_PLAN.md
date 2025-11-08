@@ -26,6 +26,62 @@
            4. 완전 전환
 ```
 
+### 🔑 주요 데이터 구조 변경사항
+
+이번 마이그레이션에서는 **Map 기반 구조**를 사용하여 성능과 효율성을 극대화합니다:
+
+#### 1. 배당 데이터 (dividend)
+**기존 (MariaDB 배열)**:
+```json
+[
+  {"date": "2024-03-29", "price": 361},
+  {"date": "2024-06-28", "price": 361}
+]
+```
+
+**신규 (Firestore 중첩 Map)**:
+```json
+{
+  "2024": {
+    "03-29": 361,
+    "06-28": 361
+  }
+}
+```
+- ✅ 특정 년도 배당 빠른 조회
+- ✅ 부분 업데이트 가능
+- ✅ 데이터 크기 감소
+
+#### 2. 일별 데이터 (stock)
+**기존 (MariaDB 행)**:
+```
+code | date       | open  | high  | low   | close | volume
+005930 | 2024-11-05 | 58000 | 58500 | 57800 | 58200 | 12345678
+```
+
+**신규 (Firestore Map)**:
+```
+stocks/005930/monthly/2024-11
+{
+  "days": {
+    "05": {
+      "close": 58200,
+      "volume": 12345678,
+      "open": 58000,
+      "low": 57800,
+      "high": 58500
+    }
+  }
+}
+```
+- ✅ 월별 그룹핑으로 읽기 효율 증가 (250 reads → 12 reads)
+- ✅ 특정 일자 데이터 O(1) 접근
+- ✅ 일일 업데이트 시 해당 일자만 수정
+
+#### 3. 제거된 필드
+- ❌ `latest` (최신 가격): 클라이언트가 필요시 조회
+- ❌ `recent` (최근 90일): 월별 데이터에서 필요한 만큼 로드
+
 ## 📅 전체 로드맵
 
 ### Week 1: 준비 단계
@@ -167,15 +223,17 @@ FROM stock;
   - Firebase Console → 프로젝트 설정 → 서비스 계정
   - "새 비공개 키 생성" → JSON 파일 다운로드
 
-#### 마이그레이션 스크립트 구조 (월별 구조)
+#### 마이그레이션 스크립트 구조 (Map 기반 구조)
 ```
 마이그레이션 단계:
 1. 연결 설정 (MariaDB, Firestore)
 2. stock_info + dividend → stocks/{code}
-   - 기본 정보, 배당 배열, latest
-3. stock 테이블 → 월별 구조로 변환
-   - 최근 90일 → stocks/{code}/recent (배열)
-   - 나머지 → stocks/{code}/monthly/{YYYY-MM}/days (배열)
+   - 기본 정보 (name, period)
+   - 배당을 중첩 Map으로 변환: year -> "MM-DD" -> amount
+   - updated_at 타임스탬프
+3. stock 테이블 → 월별 Map 구조로 변환
+   - stocks/{code}/monthly/{YYYY-MM}
+   - days Map: day -> {close, volume, open, low, high}
    - 날짜별로 그룹핑하여 월별 문서 생성
 4. horizontal → users/{userId}/lines/{lineId}
    - 기본 사용자 ID 할당 또는 수동 분리
@@ -184,8 +242,9 @@ FROM stock;
 
 **주요 변환 로직**:
 - 일별 데이터를 date 기준으로 월별 그룹핑
-- 최근 90일은 recent 배열에 저장
-- 배당 데이터는 별도 배열로 (일별 데이터에 포함 안 함)
+- 각 월의 데이터를 days Map에 저장 (키: 일자, 값: OHLCV)
+- 배당 데이터를 중첩 Map으로 변환 (년도 -> 날짜 -> 금액)
+- latest, recent 필드는 생성하지 않음 (클라이언트가 필요시 조회)
 
 ### Day 2: 마이그레이션 실행 및 검증
 
@@ -201,8 +260,14 @@ FROM stock;
 - [ ] 종목 수 일치
 - [ ] 일별 데이터 총 개수 일치
 - [ ] 월별 문서 개수 확인 (종목 × 월 수)
-- [ ] recent 배열 크기 (최대 90개)
-- [ ] 배당 데이터 정확성 (배열 형태)
+- [ ] 배당 데이터 정확성 (중첩 Map 형태 확인)
+  - [ ] 년도별 그룹핑 확인
+  - [ ] 날짜 형식 "MM-DD" 확인
+  - [ ] 배당금액 정확성 확인
+- [ ] 월별 데이터 Map 구조 확인
+  - [ ] days 필드가 Map인지 확인
+  - [ ] 일자가 키("01", "05" 등)로 되어있는지 확인
+  - [ ] 각 일자별 {close, volume, open, low, high} 존재 확인
 - [ ] 날짜 범위 확인
 - [ ] 가로선 데이터 확인
 - [ ] 타임스탬프 필드 존재 확인
@@ -212,9 +277,95 @@ FROM stock;
 Firestore Console에서:
 1. stocks 컬렉션 문서 수 = MariaDB 종목 수
 2. 임의 종목의 monthly 서브컬렉션 문서 수 확인
-3. recent 배열 길이 확인 (최대 90)
-4. dividends 배열 확인 (일별 데이터에 없음)
+3. 종목 문서의 dividends 구조 확인
+   - dividends["2024"]["03-29"] = 361 형태
+4. 월별 문서의 days 구조 확인
+   - days["05"] = {close: ..., volume: ..., ...} 형태
+5. 데이터 샘플링으로 정확성 검증
+   - MariaDB 특정 날짜 데이터와 Firestore 비교
 ```
+
+#### 데이터 변환 상세 로직
+
+**1. 배당 데이터 변환 (dividend → Map)**
+```python
+# SQL에서 가져온 데이터
+dividends_from_db = [
+  {"date": "2024-03-29", "price": 361},
+  {"date": "2024-06-28", "price": 361},
+  {"date": "2025-10-30", "price": 123}
+]
+
+# Firestore Map으로 변환
+dividend_map = {}
+for div in dividends_from_db:
+    year, month, day = div["date"].split("-")
+    month_day = f"{month}-{day}"
+
+    if year not in dividend_map:
+        dividend_map[year] = {}
+
+    dividend_map[year][month_day] = div["price"]
+
+# 결과:
+# {
+#   "2024": {"03-29": 361, "06-28": 361},
+#   "2025": {"10-30": 123}
+# }
+```
+
+**2. 일별 데이터 변환 (stock → Map)**
+```python
+# SQL에서 가져온 데이터
+daily_data_from_db = [
+  {"date": "2024-11-01", "open": 58000, "high": 58400, ...},
+  {"date": "2024-11-04", "open": 58100, "high": 58500, ...},
+  {"date": "2024-12-02", "open": 59000, "high": 59200, ...}
+]
+
+# 월별로 그룹핑
+monthly_data = {}
+for data in daily_data_from_db:
+    year, month, day = data["date"].split("-")
+    year_month = f"{year}-{month}"
+
+    if year_month not in monthly_data:
+        monthly_data[year_month] = {}
+
+    monthly_data[year_month][day] = {
+        "close": data["close"],
+        "volume": data["volume"],
+        "open": data["open"],
+        "low": data["low"],
+        "high": data["high"]
+    }
+
+# 결과:
+# {
+#   "2024-11": {
+#     "01": {close: 58100, volume: 11234567, ...},
+#     "04": {close: 58200, volume: 12345678, ...}
+#   },
+#   "2024-12": {
+#     "02": {close: 59100, volume: 13456789, ...}
+#   }
+# }
+
+# Firestore에 저장
+for year_month, days in monthly_data.items():
+    firestore.collection('stocks') \
+      .doc(stock_code) \
+      .collection('monthly') \
+      .doc(year_month) \
+      .set({"days": days})
+```
+
+**3. 데이터 크기 고려사항**
+- Firestore 문서 최대 크기: 1MB
+- 월별 평균 영업일: ~23일
+- 일별 데이터 크기: ~150 bytes
+- 예상 월별 문서 크기: 23 × 150 = 3.45 KB
+- ✅ 안전 범위 내
 
 ---
 
@@ -235,6 +386,11 @@ Firestore Console에서:
 - [ ] API 키 환경 변수로 관리
 - [ ] 에러 핸들링 추가
 - [ ] 로깅 추가
+- [ ] Map 구조로 데이터 업데이트 로직 구현
+  - [ ] 새 데이터의 년-월 추출
+  - [ ] 해당 월 문서 조회
+  - [ ] days Map에 새 일자 데이터 추가 (FieldValue.update 사용)
+  - [ ] 배당 데이터 업데이트 시 중첩 Map 업데이트
 
 ### Day 3: 스케줄링 및 배포
 
@@ -284,21 +440,25 @@ Firestore Console에서:
 #### 3. Firestore 연동
 **체크리스트**:
 - [ ] 기존 API 호출 제거
-- [ ] Firestore 쿼리로 대체 (월별 구조)
-  - 종목 문서 + recent 배열 로드 (1 read)
-  - 필요시 월별 데이터 로드 (N reads)
+- [ ] Firestore 쿼리로 대체 (Map 기반 월별 구조)
+  - 종목 문서 로드: name, period, dividends (1 read)
+  - 월별 데이터 로드: stocks/{code}/monthly/{YYYY-MM} (N reads)
+  - Map 구조 파싱 로직 구현
 - [ ] 실시간 리스너 추가 (가로선용)
 - [ ] 로컬 캐싱 활성화
 
 ### Day 3-4: 기능 이식
 
-#### 1. 차트 데이터 로딩 (월별 구조)
+#### 1. 차트 데이터 로딩 (Map 기반 월별 구조)
 **체크리스트**:
 - [ ] 종목 선택 시 데이터 로드
-  - 종목 문서 로드 (recent + 배당 포함)
-  - 추가 히스토리 필요 시 월별 로드
+  - 종목 문서 로드 (name, period, dividends Map)
+  - 필요한 기간의 월별 문서 로드 (예: 최근 12개월)
+  - Map 구조를 배열로 변환하는 로직 구현
+    - dividends Map → 배당 날짜 배열
+    - days Map → 일별 데이터 배열
 - [ ] TradingView 차트 연동
-- [ ] 배당 마커 표시 (배열에서 로드)
+- [ ] 배당 마커 표시 (dividends Map에서 변환)
 - [ ] 거래량 차트 표시
 
 #### 2. 사용자 기능 (인증 기반)
@@ -439,6 +599,184 @@ Firestore Console에서:
 - [ ] 빌드 및 테스트
 - [ ] APK 생성
 - [ ] 직접 설치 (2명)
+
+---
+
+## 🎯 Map 구조 마이그레이션 핵심 전략
+
+### 왜 Map 구조를 사용하는가?
+
+**배열 구조의 문제점**:
+- 특정 날짜 데이터 접근 시 전체 배열 스캔 필요
+- 부분 업데이트가 어려움 (전체 배열 다시 저장)
+- 데이터 크기가 클수록 비효율적
+
+**Map 구조의 장점**:
+- O(1) 시간으로 특정 날짜 데이터 접근
+- 부분 업데이트 가능 (`days.05` 만 업데이트)
+- Firestore의 nested field update 최적화
+- 클라이언트에서 필요한 날짜만 파싱 가능
+
+### 마이그레이션 단계별 주의사항
+
+#### Phase 1: 데이터 구조 변환
+**주의사항**:
+- [ ] 날짜 형식 일관성 유지
+  - 년도: "2024" (4자리)
+  - 월: "11" (2자리, 0 패딩)
+  - 일: "05" (2자리, 0 패딩)
+- [ ] 배당 데이터 누락 방지
+  - 모든 년도 포함 확인
+  - 배당 금액 0 처리 (null vs 0 구분)
+- [ ] 데이터 타입 보존
+  - close, open, high, low: number (float)
+  - volume: number (integer)
+  - date strings: 정확한 형식
+
+#### Phase 2: Cloud Function 개발
+**업데이트 로직**:
+```python
+# 새 데이터 추가 예시
+new_data = {
+  "date": "2024-11-06",
+  "open": 58500,
+  "high": 59000,
+  "low": 58300,
+  "close": 58800,
+  "volume": 15000000
+}
+
+# 년-월-일 추출
+year, month, day = new_data["date"].split("-")
+year_month = f"{year}-{month}"
+
+# Firestore 업데이트 (기존 문서에 추가)
+doc_ref = db.collection('stocks').doc(stock_code) \
+  .collection('monthly').doc(year_month)
+
+# Map 필드 업데이트 (merge 사용)
+doc_ref.set({
+  "days": {
+    day: {
+      "close": new_data["close"],
+      "volume": new_data["volume"],
+      "open": new_data["open"],
+      "low": new_data["low"],
+      "high": new_data["high"]
+    }
+  }
+}, merge=True)
+```
+
+**배당 업데이트**:
+```python
+# 배당 추가
+dividend_data = {
+  "date": "2024-12-15",
+  "amount": 400
+}
+
+year, month, day = dividend_data["date"].split("-")
+month_day = f"{month}-{day}"
+
+# 중첩 Map 업데이트
+stock_ref = db.collection('stocks').doc(stock_code)
+stock_ref.set({
+  "dividends": {
+    year: {
+      month_day: dividend_data["amount"]
+    }
+  },
+  "updated_at": firestore.SERVER_TIMESTAMP
+}, merge=True)
+```
+
+#### Phase 3: React 클라이언트 개발
+**Map 파싱 로직**:
+```javascript
+// 1. 월별 데이터 로드 및 파싱
+const loadMonthlyData = async (stockCode, months = 12) => {
+  const snapshot = await db
+    .collection(`stocks/${stockCode}/monthly`)
+    .orderBy('__name__', 'desc')
+    .limit(months)
+    .get();
+
+  const chartData = [];
+  snapshot.docs.forEach(doc => {
+    const yearMonth = doc.id; // "2024-11"
+    const days = doc.data().days;
+
+    // Map을 배열로 변환
+    Object.entries(days).forEach(([day, data]) => {
+      chartData.push({
+        time: `${yearMonth}-${day}`, // "2024-11-05"
+        ...data // {close, volume, open, low, high}
+      });
+    });
+  });
+
+  // 날짜순 정렬
+  chartData.sort((a, b) => a.time.localeCompare(b.time));
+  return chartData;
+};
+
+// 2. 배당 데이터 파싱
+const parseDividends = (dividendsMap) => {
+  const dividends = [];
+
+  Object.entries(dividendsMap || {}).forEach(([year, dates]) => {
+    Object.entries(dates).forEach(([monthDay, amount]) => {
+      dividends.push({
+        date: `${year}-${monthDay}`, // "2024-03-29"
+        amount: amount
+      });
+    });
+  });
+
+  dividends.sort((a, b) => a.date.localeCompare(b.date));
+  return dividends;
+};
+```
+
+### 성능 최적화
+
+#### 1. 읽기 최적화
+- 필요한 기간만 조회 (예: 최근 12개월)
+- 차트 확대 시 추가 데이터 lazy loading
+- Firestore 캐시 활용
+
+#### 2. 쓰기 최적화
+- 일일 업데이트: 현재 월 문서만 업데이트
+- Batch write 사용 (여러 종목 동시 업데이트)
+- Transaction 사용 (데이터 일관성 보장)
+
+#### 3. 비용 최적화
+- 읽기 횟수: 1년 데이터 = 12 reads (배열 방식은 ~250 reads)
+- 쓰기 횟수: 1일 업데이트 = 종목당 1 write
+- 예상 일일 비용: ~$0.01 (50종목 기준)
+
+### 테스트 체크리스트
+
+#### 데이터 정합성
+- [ ] SQL의 특정 날짜 데이터와 Firestore Map 데이터 비교
+- [ ] 모든 배당 날짜와 금액 일치 확인
+- [ ] 날짜 범위 확인 (최소, 최대 날짜)
+- [ ] 누락된 영업일 확인
+
+#### 기능 테스트
+- [ ] 차트 로딩: 12개월 데이터 정상 표시
+- [ ] 배당 마커: 모든 배당일에 표시
+- [ ] 최저/최고가: 배당 구간마다 정확히 표시
+- [ ] 거래량: 차트 하단에 정상 표시
+- [ ] 가로선: CRUD 모두 작동
+- [ ] 실시간 업데이트: 새 데이터 추가 시 자동 반영
+
+#### 성능 테스트
+- [ ] 초기 로딩 시간: < 3초
+- [ ] 종목 전환 시간: < 1초
+- [ ] Firestore 읽기 횟수 확인
+- [ ] 모바일 성능 확인
 
 ---
 
