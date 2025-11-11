@@ -7,6 +7,7 @@ Copy this file to: migration/migrate.py
 """
 
 import pymysql
+import argparse
 import firebase_admin
 from firebase_admin import credentials, firestore
 from datetime import datetime
@@ -62,10 +63,12 @@ class MigrationStats:
 class FirestoreMigration:
     """Handle migration from SQL to Firestore"""
 
-    def __init__(self):
+    def __init__(self, limit=None, offset=None):
         self.stats = MigrationStats()
         self.db_connection = None
         self.firestore_db = None
+        self.limit = limit
+        self.offset = offset
 
     def connect_mariadb(self):
         """Connect to MariaDB database"""
@@ -101,9 +104,21 @@ class FirestoreMigration:
             raise
 
     def fetch_stock_info(self):
-        """Fetch all stock info from SQL"""
+        """Fetch stock info from SQL, with optional limit and offset"""
+        query = "SELECT Code, Name, Period FROM stock_info ORDER BY Code"
+        
+        # Safely convert limit and offset to integers
+        limit_val = int(self.limit) if self.limit is not None else None
+        offset_val = int(self.offset) if self.offset is not None else None
+
+        if limit_val is not None:
+            query += f" LIMIT {limit_val}"
+        if offset_val is not None:
+            query += f" OFFSET {offset_val}"
+        
         with self.db_connection.cursor() as cursor:
-            cursor.execute("SELECT Code, Name, Period FROM stock_info")
+            print(f"  Executing query: {query}")
+            cursor.execute(query)
             return cursor.fetchall()
 
     def fetch_dividends_by_code(self, code):
@@ -434,6 +449,14 @@ class FirestoreMigration:
 
 def main():
     """Main entry point"""
+    parser = argparse.ArgumentParser(description="SQL to Firestore Migration Script. Use --limit and --offset to migrate in chunks.")
+    parser.add_argument('--limit', type=int, help='Number of stock records to process.')
+    parser.add_argument('--offset', type=int, help='Offset to start processing stock records from.')
+    args = parser.parse_args()
+
+    if args.limit is not None:
+        print(f"▶️  Running in chunk mode: LIMIT={args.limit}, OFFSET={args.offset or 0}")
+
     # Check environment variables
     required_vars = ['DB_USER', 'DB_PASSWORD', 'DB_NAME', 'FIREBASE_CREDENTIALS_PATH']
     missing_vars = [var for var in required_vars if not os.getenv(var)]
@@ -444,15 +467,19 @@ def main():
         return
 
     # Run migration
-    migration = FirestoreMigration()
+    migration = FirestoreMigration(limit=args.limit, offset=args.offset)
     success = migration.run()
 
     if success:
         print("\n🎉 Migration completed successfully!")
         print("\nNext steps:")
         print("1. Check Firebase Console to verify data")
-        print("2. Run test queries to validate data accuracy")
-        print("3. Proceed to Week 3: Cloud Function development")
+        if args.limit is not None:
+            next_offset = (args.offset or 0) + args.limit
+            print("2. To migrate the next chunk, run:")
+            print(f"   python migrate.py --limit {args.limit} --offset {next_offset}")
+        else:
+            print("2. Proceed to Week 3: Cloud Function development")
     else:
         print("\n⚠️  Migration completed with errors. Please review the error messages above.")
 
