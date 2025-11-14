@@ -6,17 +6,23 @@ Migrates stock data from MariaDB to Firebase Firestore using Map-based structure
 Copy this file to: migration/migrate.py
 """
 
-import pymysql
 import argparse
-import firebase_admin
-from firebase_admin import credentials, firestore
-from datetime import datetime
+import logging
 import os
-from dotenv import load_dotenv
 from collections import defaultdict
+from datetime import datetime
 
-# Load environment variables
-load_dotenv()
+import firebase_admin
+import pymysql
+from dotenv import load_dotenv
+from firebase_admin import credentials, firestore
+
+# Configure root logger (console output)
+logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+
+# Ensure we always load the migration-specific .env file
+ENV_PATH = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 # Line style mapping
 LINE_STYLE_MAP = {
@@ -63,12 +69,16 @@ class MigrationStats:
 class FirestoreMigration:
     """Handle migration from SQL to Firestore"""
 
-    def __init__(self, limit=None, offset=None):
+    def __init__(self, limit=None, offset=None, verbose=False):
         self.stats = MigrationStats()
         self.db_connection = None
         self.firestore_db = None
         self.limit = limit
         self.offset = offset
+        self.verbose = verbose
+        self.logger = logging.getLogger(self.__class__.__name__)
+        if verbose:
+            self.logger.setLevel(logging.DEBUG)
 
     def connect_mariadb(self):
         """Connect to MariaDB database"""
@@ -187,6 +197,7 @@ class FirestoreMigration:
         Output: {'2025-01': {'02': {close: 9860, ...}}, ...}
         """
         monthly_data = defaultdict(dict)
+        logger = self.logger
 
         for row in stock_data:
             date_str = row['Date'].strftime('%Y-%m-%d') if hasattr(row['Date'], 'strftime') else str(row['Date'])
@@ -195,6 +206,12 @@ class FirestoreMigration:
             year_month = f"{year}-{month}"
 
             # Create day data
+            if day in monthly_data[year_month]:
+                logger.warning(
+                    "Duplicate record detected for %s on %s; overwriting previous entry.",
+                    year_month,
+                    day,
+                )
             monthly_data[year_month][day] = {
                 'close': int(row['Close']),
                 'volume': int(row['Volume']),
@@ -217,7 +234,7 @@ class FirestoreMigration:
             name = stock_info['Name']
             period = PERIOD_MAP.get(stock_info['Period'], stock_info['Period'])
 
-            print(f"  [{idx}/{total}] Processing {code} - {name}")
+            self.logger.info("  [%d/%d] Processing %s - %s", idx, total, code, name)
 
             try:
                 # Fetch dividends
@@ -235,11 +252,11 @@ class FirestoreMigration:
                 })
 
                 self.stats.stocks_migrated += 1
-                print(f"      ✓ Created stock document with {len(dividends)} dividends")
+                self.logger.debug("      ✓ %s dividends=%d", code, len(dividends))
 
             except Exception as e:
                 error_msg = f"Error migrating stock {code}: {e}"
-                print(f"      ✗ {error_msg}")
+                self.logger.error("      ✗ %s", error_msg)
                 self.stats.errors.append(error_msg)
 
     def migrate_monthly_data(self):
@@ -253,7 +270,7 @@ class FirestoreMigration:
             code = stock_info['Code']
             name = stock_info['Name']
 
-            print(f"  [{idx}/{total}] Processing {code} - {name}")
+            self.logger.info("  [%d/%d] Processing %s - %s", idx, total, code, name)
 
             try:
                 # Fetch all stock data
@@ -262,6 +279,40 @@ class FirestoreMigration:
 
                 # Transform to monthly Map structure
                 monthly_data = self.transform_stock_data_to_monthly(stock_data)
+
+                total_days = sum(len(days) for days in monthly_data.values())
+                distinct_dates = len({row['Date'] for row in stock_data})
+                first_date = stock_data[0]['Date'] if stock_data else None
+                last_date = stock_data[-1]['Date'] if stock_data else None
+
+                if self.verbose:
+                    self.logger.debug(
+                        "      • %s date range %s → %s, rows=%d, distinct_dates=%d, mapped_days=%d",
+                        code,
+                        first_date,
+                        last_date,
+                        len(stock_data),
+                        distinct_dates,
+                        total_days,
+                    )
+
+                    for year_month, days in sorted(monthly_data.items()):
+                        self.logger.debug(
+                            "        – %s: %d days (%s … %s)",
+                            year_month,
+                            len(days),
+                            min(days.keys()),
+                            max(days.keys()),
+                        )
+
+                if total_days != distinct_dates:
+                    self.logger.warning(
+                        "      ⚠️ %s has row/day mismatch: rows=%d distinct=%d mapped=%d",
+                        code,
+                        len(stock_data),
+                        distinct_dates,
+                        total_days,
+                    )
 
                 # Create monthly documents
                 batch = self.firestore_db.batch()
@@ -287,11 +338,15 @@ class FirestoreMigration:
                 if batch_count > 0:
                     batch.commit()
 
-                print(f"      ✓ Created {len(monthly_data)} monthly documents ({len(stock_data)} daily records)")
+                self.logger.info(
+                    "      ✓ Created %d monthly documents (%d daily records)",
+                    len(monthly_data),
+                    len(stock_data),
+                )
 
             except Exception as e:
                 error_msg = f"Error migrating monthly data for {code}: {e}"
-                print(f"      ✗ {error_msg}")
+                self.logger.error("      ✗ %s", error_msg)
                 self.stats.errors.append(error_msg)
 
     def migrate_horizontal_lines(self):
@@ -452,7 +507,12 @@ def main():
     parser = argparse.ArgumentParser(description="SQL to Firestore Migration Script. Use --limit and --offset to migrate in chunks.")
     parser.add_argument('--limit', type=int, help='Number of stock records to process.')
     parser.add_argument('--offset', type=int, help='Offset to start processing stock records from.')
+    parser.add_argument('--verbose', action='store_true', help='Enable verbose logging output.')
     args = parser.parse_args()
+
+    # Adjust global logging level based on verbosity
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
 
     if args.limit is not None:
         print(f"▶️  Running in chunk mode: LIMIT={args.limit}, OFFSET={args.offset or 0}")
@@ -467,7 +527,7 @@ def main():
         return
 
     # Run migration
-    migration = FirestoreMigration(limit=args.limit, offset=args.offset)
+    migration = FirestoreMigration(limit=args.limit, offset=args.offset, verbose=args.verbose)
     success = migration.run()
 
     if success:
